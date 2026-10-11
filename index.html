@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Upcoming Classes</title>
   <style>
-    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #302e2b; background: #fbfaf8; }
+    :root { font-family: Georgia, "Times New Roman", serif; color: #302e2b; background: #fbfaf8; }
     * { box-sizing: border-box; }
     body { margin: 0; padding: 20px; max-width: 660px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
@@ -28,6 +28,7 @@
     .meta { font-size: 12px; color: #817e78; margin-top: 4px; }
     .empty { padding: 22px 16px; color: #817e78; font-size: 13px; }
     .pill { font-size: 11px; border-radius: 20px; background: #e8edf7; color: #506585; padding: 5px 9px; white-space: nowrap; }
+    .module-filter { flex-basis: 100%; }
     #status { font-size: 12px; color: #77716b; margin: 8px 0; min-height: 18px; }
   </style>
 </head>
@@ -44,6 +45,9 @@
       <option>Connect to select calendar</option>
     </select>
     <button id="refresh" disabled>↻ Refresh</button>
+    <select id="module" class="module-filter" aria-label="Filter by module" disabled>
+      <option value="all">All modules</option>
+    </select>
   </div>
   <div id="status" role="status"></div>
   <div id="events"><div class="empty">Connect your Google account to display upcoming lectures and tutorials.</div></div>
@@ -52,6 +56,7 @@
     const CLIENT_ID = '463372546640-ideuetn7mvbjo26sol9vkhlcgmmhqdpr.apps.googleusercontent.com';
     const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly';
     let tokenClient, token = null;
+    let cachedEvents = [];
 
     const $ = id => document.getElementById(id);
     const status = message => { $('status').textContent = message; };
@@ -84,6 +89,10 @@
       if (c) c.requestAccessToken({ prompt: token ? '' : 'consent' });
     };
     $('refresh').onclick = () => loadEvents();
+    $('module').onchange = () => {
+      localStorage.setItem('universityModuleFilter', $('module').value);
+      renderEvents();
+    };
     $('calendar').onchange = () => {
       localStorage.setItem('universityCalendarId', $('calendar').value);
       loadEvents();
@@ -131,6 +140,62 @@
       }
     }
 
+    // A module code at the beginning of a timetable title, e.g. CIS5113/AE/S1/LEC/01.
+    function moduleCode(event) {
+      const title = (event.summary || '').trim();
+      const match = title.match(/^([A-Z]{2,6}\d{3,6})(?=\/|\b)/i);
+      return match ? match[1].toUpperCase() : 'Other';
+    }
+
+    function updateModuleOptions() {
+      const selector = $('module');
+      const previous = selector.value !== 'all' ? selector.value : localStorage.getItem('universityModuleFilter');
+      const codes = [...new Set(cachedEvents.map(moduleCode))].sort((a, b) =>
+        a === 'Other' ? 1 : b === 'Other' ? -1 : a.localeCompare(b));
+      selector.replaceChildren();
+      const all = new Option('All modules', 'all');
+      selector.appendChild(all);
+      codes.forEach(code => selector.appendChild(new Option(code === 'Other' ? 'Other events' : code, code)));
+      selector.value = codes.includes(previous) ? previous : 'all';
+      selector.disabled = false;
+    }
+
+    function renderEvents() {
+      const selection = $('module').value;
+      const matching = cachedEvents.filter(e => selection === 'all' || moduleCode(e) === selection);
+      const shown = matching.slice(0, 15);
+      const target = $('events');
+      target.replaceChildren();
+      if (!shown.length) {
+        target.innerHTML = '<div class="empty">No upcoming events for this module in the next 250 calendar events. Try All modules.</div>';
+        status('No matching upcoming events');
+        return;
+      }
+      for (const event of shown) {
+        const start = event.start?.dateTime || event.start?.date;
+        const end = event.end?.dateTime || event.end?.date;
+        if (!start) continue;
+        const date = new Date(start);
+        const allDay = !!event.start?.date;
+        const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(date).toUpperCase();
+        const day = new Intl.DateTimeFormat(undefined, { day: 'numeric' }).format(date);
+        const dateLabel = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+        const timeLabel = allDay ? 'All day' :
+          new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date) +
+          (end ? ' – ' + new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(end)) : '');
+        const type = /tutorial|seminar/i.test(event.summary || '') ? 'Tutorial' :
+          /lecture/i.test(event.summary || '') ? 'Lecture' : 'Class';
+        const line = document.createElement('a');
+        line.className = 'event';
+        line.href = event.htmlLink || 'https://calendar.google.com';
+        line.target = '_blank';
+        line.rel = 'noopener noreferrer';
+        line.innerHTML = `<div class="day"><div class="weekday">${htmlEscape(weekday)}</div><div class="number">${htmlEscape(day)}</div></div><div class="info"><div class="title">${htmlEscape(event.summary || 'Untitled event')}</div><div class="meta">${htmlEscape(dateLabel + ' · ' + timeLabel + (event.location ? ' · ' + event.location : ''))}</div></div><span class="pill">${type}</span>`;
+        target.appendChild(line);
+      }
+      status('Showing next ' + shown.length + ' ' + (selection === 'all' ? 'events' : 'events for ' + selection) + ' · Refresh to update');
+    }
+
     async function loadEvents() {
       if (!token || !$('calendar').value) return;
       status('Updating events…');
@@ -140,40 +205,12 @@
           timeMin: new Date().toISOString(),
           singleEvents: 'true',
           orderBy: 'startTime',
-          maxResults: '15'
+          maxResults: '250'
         });
         const data = await api(`https://www.googleapis.com/calendar/v3/calendars/${id}/events?${params}`);
-        const target = $('events');
-        target.replaceChildren();
-        const events = (data.items || []).filter(e => e.status !== 'cancelled');
-        if (!events.length) {
-          target.innerHTML = '<div class="empty">No upcoming events in this calendar.</div>';
-          status('Up to date');
-          return;
-        }
-        for (const event of events) {
-          const start = event.start?.dateTime || event.start?.date;
-          const end = event.end?.dateTime || event.end?.date;
-          if (!start) continue;
-          const date = new Date(start);
-          const allDay = !!event.start?.date;
-          const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(date).toUpperCase();
-          const day = new Intl.DateTimeFormat(undefined, { day: 'numeric' }).format(date);
-          const dateLabel = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
-          const timeLabel = allDay ? 'All day' :
-            new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date) +
-            (end ? ' – ' + new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(end)) : '');
-          const type = /tutorial|seminar/i.test(event.summary || '') ? 'Tutorial' :
-            /lecture/i.test(event.summary || '') ? 'Lecture' : 'Class';
-          const line = document.createElement('a');
-          line.className = 'event';
-          line.href = event.htmlLink || 'https://calendar.google.com';
-          line.target = '_blank';
-          line.rel = 'noopener noreferrer';
-          line.innerHTML = `<div class="day"><div class="weekday">${htmlEscape(weekday)}</div><div class="number">${htmlEscape(day)}</div></div><div class="info"><div class="title">${htmlEscape(event.summary || 'Untitled event')}</div><div class="meta">${htmlEscape(dateLabel + ' · ' + timeLabel + (event.location ? ' · ' + event.location : ''))}</div></div><span class="pill">${type}</span>`;
-          target.appendChild(line);
-        }
-        status('Next ' + events.length + ' events · Refresh to update');
+        cachedEvents = (data.items || []).filter(e => e.status !== 'cancelled' && (e.start?.dateTime || e.start?.date));
+        updateModuleOptions();
+        renderEvents();
       } catch (error) {
         status(error.message);
       }
